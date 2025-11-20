@@ -7,21 +7,21 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split, WeightedRandomSampler
 from torchvision import datasets, transforms, models
 
-# 图像大小&归一化常量,给predict_camera复用
+
 IMG_SIZE = 128
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 def build_model(num_classes, device):
-    # 预训练resnet18
+
     model = models.resnet18(pretrained=True)
 
-    # 先全部冻结
+
     for p in model.parameters():
         p.requires_grad = False
 
-    # 只训练layer4+fc,既能适应新任务又不至于过拟合
+
     for name, p in model.named_parameters():
         if "layer4" in name or "fc" in name:
             p.requires_grad = True
@@ -64,7 +64,7 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("使用设备:", device)
 
-    # 数据增强
+
     train_transform = transforms.Compose([
         transforms.RandomResizedCrop(IMG_SIZE, scale=(0.7, 1.0)),
         transforms.RandomRotation(10),
@@ -79,7 +79,7 @@ def main(args):
         transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
     ])
 
-    # 先用同一个ImageFolder,再按比例划分
+
     full_dataset = datasets.ImageFolder(root=str(data_dir), transform=train_transform)
     class_names = full_dataset.classes
     num_classes = len(class_names)
@@ -91,11 +91,11 @@ def main(args):
     num_train = num_samples - num_val
 
     train_dataset, val_dataset = random_split(full_dataset, [num_train, num_val])
-    # 验证集用更“干净”的transform
+
     val_dataset.dataset.transform = val_transform
 
-    # 统计训练集各类别样本数,构建WeightedRandomSampler
-    train_indices = train_dataset.indices  # 在full_dataset里的索引
+  
+    train_indices = train_dataset.indices 
     all_targets = np.array(full_dataset.targets)
     train_labels = all_targets[train_indices]
 
@@ -124,14 +124,14 @@ def main(args):
 
     model = build_model(num_classes, device)
 
-    # 只给requires_grad=True的参数优化
+
     optimizer = torch.optim.Adam(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.lr,
         weight_decay=1e-4
     )
 
-    # 去掉label_smoothing,让输出更“自信”
+  
     criterion = nn.CrossEntropyLoss()
 
     best_val_acc = 0.0
@@ -173,10 +173,10 @@ def main(args):
 
     print("训练完成!最佳验证准确率:", best_val_acc)
 
-    # 保存最好的一版
+  
     torch.save(best_state, "best_model.pth")
 
-    # 保存类别索引映射,给predict_camera用
+  
     idx_to_class = {idx: name for idx, name in enumerate(class_names)}
     torch.save(idx_to_class, "idx_to_class.pth")
     print("已保存best_model.pth和idx_to_class.pth")

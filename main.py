@@ -10,36 +10,29 @@ from torchvision import transforms, models
 from pathlib import Path
 from collections import deque, Counter
 
-#==============1.路径和配置==============#
 
 ROOT_DIR = Path(__file__).resolve().parent
 
-# 模型和标签文件(都放在项目根目录)
 MODEL_PATH = ROOT_DIR / "best_model.pth"
 IDX2CLASS_PATH = ROOT_DIR / "idx_to_class.pth"
 LABELS_JSON_PATH = ROOT_DIR / "labels.json"
 
-# 串口(和Arduino IDE右下角保持一致)
 SERIAL_PORT = "COM4"
 BAUD_RATE = 115200
 
-# 药品逻辑&去抖设置
-TARGET_CHAR = "B"          #当前要吃的药(需要别的就改成"A"或"C")
-MIN_CONF = 0.60            #置信度阈值(低于这个一律当empty处理)
-EMPTY_NAME = "empty"       #空集类别名
+TARGET_CHAR = "B"         
+MIN_CONF = 0.60           
+EMPTY_NAME = "empty"       
 
-HISTORY_LEN = 8            #去抖窗口长度(最近多少帧参与投票)
-HISTORY_MIN_COUNT = 6      #至少多少帧一致才真正下发给单片机
+HISTORY_LEN = 8            
+HISTORY_MIN_COUNT = 6      
 
-# 图像预处理参数(和train.py保持一致)
 IMG_SIZE = 128
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
-#==============2.模型和标签==============#
 
 def load_labels():
-    """优先从idx_to_class.pth加载标签映射,否则尝试labels.json,再否则用默认"""
     if IDX2CLASS_PATH.exists():
         obj = torch.load(IDX2CLASS_PATH, map_location="cpu")
         if isinstance(obj, dict):
@@ -55,7 +48,6 @@ def load_labels():
         with open(LABELS_JSON_PATH, "r", encoding="utf-8") as f:
             raw = json.load(f)
         if isinstance(raw, dict):
-            # 可能是{"0":"A","1":"B"}或{"A":0,"B":1}
             if all(isinstance(k, str) and k.isdigit() for k in raw.keys()):
                 labels = {int(k): str(v) for k, v in raw.items()}
             else:
@@ -67,7 +59,6 @@ def load_labels():
         print("标签映射(labels.json):", labels)
         return labels
 
-    # 实在没有就用默认顺序
     labels = {0: "A", 1: "B", 2: "C", 3: "empty"}
     print("标签映射(默认):", labels)
     return labels
@@ -97,8 +88,6 @@ def init_model(device):
     print("模型已加载:", MODEL_PATH)
     return model, labels
 
-#==============3.图像预处理==============#
-
 transform = transforms.Compose([
     transforms.ToPILImage(),
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
@@ -108,7 +97,6 @@ transform = transforms.Compose([
 
 
 def find_screen_roi(frame):
-    """根据亮度找出手机屏幕的矩形区域,返回(x,y,w,h)或None"""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     _, thresh = cv2.threshold(blur, 200, 255, cv2.THRESH_BINARY)
@@ -136,7 +124,6 @@ def find_screen_roi(frame):
     if max_box is None:
         return None
 
-    # 稍微扩一点边缘
     x, y, w, h = max_box
     pad = 10
     x = max(x - pad, 0)
@@ -151,7 +138,6 @@ def preprocess_roi(roi, device):
     tensor = transform(img_rgb).unsqueeze(0).to(device)
     return tensor
 
-#==============4.状态与串口发送==============#
 
 def decide_state(pred_label, conf):
     """
@@ -168,11 +154,7 @@ def decide_state(pred_label, conf):
 
 
 def vote_and_send(state_code, history, ser, last_sent, pred_label, conf):
-    """
-    1.把本帧state_code塞进history
-    2.当history满了以后,做一次投票
-    3.如果投票结果和上次发送的不一样,并且满足计数门槛,就发
-    """
+  
     history.append(state_code)
 
     send_code = None
@@ -188,26 +170,21 @@ def vote_and_send(state_code, history, ser, last_sent, pred_label, conf):
 
     return last_sent
 
-#==============5.主循环==============#
-
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("使用设备:", device)
 
     model, labels = init_model(device)
 
-    # 打开串口
     try:
         ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
         time.sleep(2)
         print("串口已打开:", SERIAL_PORT)
-        # 先发一个"2"让灯和蜂鸣器全部关闭
         ser.write(b"2")
     except Exception as e:
         print("打开串口失败:", e)
         ser = None
 
-    # 打开摄像头
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("无法打开摄像头")
@@ -231,7 +208,6 @@ def main():
             else:
                 roi = frame
 
-            # 前向推理
             with torch.no_grad():
                 input_tensor = preprocess_roi(roi, device)
                 logits = model(input_tensor)

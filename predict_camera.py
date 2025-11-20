@@ -6,10 +6,10 @@ from collections import deque, Counter
 from torchvision import models, transforms
 from PIL import Image
 
-# 直接用train.py里的常量,确保和训练时一致
+
 from train import IMG_SIZE, IMAGENET_MEAN, IMAGENET_STD
 
-# 验证时的预处理
+
 eval_transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.ToTensor(),
@@ -45,13 +45,13 @@ def load_model(model_path="best_model.pth", idx_path="idx_to_class.pth"):
 
 
 def find_phone_roi(frame):
-    """在整帧里找最亮的区域(手机屏幕),返回裁剪后的roi和框坐标."""
+   
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # 阈值分割,屏幕一般比较亮
+
     _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
 
-    # 闭运算,把小洞补上
+ 
     kernel = np.ones((5, 5), np.uint8)
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
 
@@ -60,18 +60,17 @@ def find_phone_roi(frame):
     if not contours:
         return None, None
 
-    # 找面积最大的亮区域
     cnt = max(contours, key=cv2.contourArea)
     h, w = gray.shape
     area = cv2.contourArea(cnt)
 
-    # 面积太小就认为没找到屏幕
+  
     if area < 0.01 * h * w:
         return None, None
 
     x, y, bw, bh = cv2.boundingRect(cnt)
 
-    # 稍微往外扩一点,避免裁得太紧
+
     pad_x = int(0.1 * bw)
     pad_y = int(0.1 * bh)
     x1 = max(0, x - pad_x)
@@ -84,14 +83,14 @@ def find_phone_roi(frame):
 
 
 def preprocess_frame(frame):
-    """返回(输入张量,屏幕框坐标).如果没检测到屏幕,返回(None,None)."""
+    
     roi, box = find_phone_roi(frame)
     if roi is None:
         return None, None
 
     rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
     pil_img = Image.fromarray(rgb)
-    tensor = eval_transform(pil_img).unsqueeze(0)  # [1,C,H,W]
+    tensor = eval_transform(pil_img).unsqueeze(0)  
     return tensor, box
 
 
@@ -103,7 +102,7 @@ def main():
         print("无法打开摄像头")
         return
 
-    # 用一个滑动窗口做多帧投票,平滑预测
+
     history = deque(maxlen=10)
     last_label = "empty"
     last_prob = 1.0
@@ -118,7 +117,7 @@ def main():
             input_tensor, box = preprocess_frame(frame)
 
             if input_tensor is None:
-                # 没找到亮屏幕,直接认为是empty
+                
                 current_label = "empty"
                 max_prob = 1.0
             else:
@@ -129,22 +128,21 @@ def main():
                 current_label = idx_to_class[pred_idx]
                 max_prob = float(probs[pred_idx])
 
-                # 画出检测到的屏幕框,方便你调试看ROI
+        
                 if box is not None:
                     x1, y1, x2, y2 = box
                     cv2.rectangle(frame, (x1, y1), (x2, y2),
                                   (0, 255, 0), 2)
 
-            # 记录历史标签
+        
             history.append(current_label)
 
-            # 多帧投票,减少A/B/C来回跳
+
             if len(history) >= 5:
                 major, count = Counter(history).most_common(1)[0]
                 final_label = major
 
-                # 对empty严格一点:如果大多数是empty但当前置信度不高,
-                # 就保持上一次的非empty标签,减少远距离抖动
+      
                 if final_label == "empty" and max_prob < 0.6:
                     final_label = last_label
             else:
@@ -161,7 +159,7 @@ def main():
             cv2.imshow("ABC Detector", frame)
 
             key = cv2.waitKey(1)
-            if key == 27:  # ESC退出
+            if key == 27: 
                 break
 
     cap.release()

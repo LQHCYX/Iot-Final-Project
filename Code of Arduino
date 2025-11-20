@@ -1,0 +1,54 @@
+const int LED_OK = 2;      //正确用药灯
+const int LED_WARN1 = 3;   //错误用药警示灯1
+const int LED_WARN2 = 4;   //错误用药警示灯2
+const int BUZZER_PIN = 8;  //蜂鸣器
+
+void setup() {
+  pinMode(LED_OK, OUTPUT);
+  pinMode(LED_WARN1, OUTPUT);
+  pinMode(LED_WARN2, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  digitalWrite(LED_OK, LOW);
+  digitalWrite(LED_WARN1, LOW);
+  digitalWrite(LED_WARN2, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  Serial.begin(115200);
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    char c = Serial.read();
+
+    if (c == '1') {
+      // 正确用药:OK灯常亮,其他全部关
+      digitalWrite(LED_OK, HIGH);
+      digitalWrite(LED_WARN1, LOW);
+      digitalWrite(LED_WARN2, LOW);
+      digitalWrite(BUZZER_PIN, LOW);
+
+    } else if (c == '0') {
+      // 错误用药:警示灯闪烁+蜂鸣器叫几下
+      for (int i = 0; i < 4; i++) {
+        digitalWrite(LED_OK, LOW);
+        digitalWrite(LED_WARN1, HIGH);
+        digitalWrite(LED_WARN2, HIGH);
+        digitalWrite(BUZZER_PIN, HIGH);
+        delay(200);
+
+        digitalWrite(LED_WARN1, LOW);
+        digitalWrite(LED_WARN2, LOW);
+        digitalWrite(BUZZER_PIN, LOW);
+        delay(200);
+      }
+
+    } else if (c == '2') {
+      // empty或不确定:全部关闭
+      digitalWrite(LED_OK, LOW);
+      digitalWrite(LED_WARN1, LOW);
+      digitalWrite(LED_WARN2, LOW);
+      digitalWrite(BUZZER_PIN, LOW);
+    }
+  }
+}

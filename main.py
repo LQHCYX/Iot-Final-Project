@@ -10,33 +10,45 @@ from torchvision import transforms, models
 from pathlib import Path
 from collections import deque, Counter
 
-
+# 路径相关
 ROOT_DIR = Path(__file__).resolve().parent
-
 MODEL_PATH = ROOT_DIR / "best_model.pth"
 IDX2CLASS_PATH = ROOT_DIR / "idx_to_class.pth"
 LABELS_JSON_PATH = ROOT_DIR / "labels.json"
 
+# 串口相关
 SERIAL_PORT = "COM4"
 BAUD_RATE = 115200
 
-TARGET_CHAR = "B"         
-MIN_CONF = 0.60           
-EMPTY_NAME = "empty"       
+# 业务逻辑相关
+TARGET_CHAR = "A"       # 正确药物标签
+MIN_CONF = 0.60         # 最低置信度
+EMPTY_NAME = "empty"    # 空集类别名(和训练时保持一致)
 
-HISTORY_LEN = 8            
-HISTORY_MIN_COUNT = 6      
+# 串口状态投票
+HISTORY_LEN = 8         # 保存最近8帧的状态码
+HISTORY_MIN_COUNT = 6   # 至少有6帧一致才发送
 
+# 图像预处理
 IMG_SIZE = 128
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
+transform = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+])
+
 
 def load_labels():
+    """优先从idx_to_class.pth加载标签映射,否则尝试labels.json,再否则用默认"""
     if IDX2CLASS_PATH.exists():
         obj = torch.load(IDX2CLASS_PATH, map_location="cpu")
         if isinstance(obj, dict):
-            labels = {int(k): str(v) for k, v in obj.items()}
+            labels = {int(k): str(v) for k, v in obj.items()
+                      }  # 可能是{0:"A",1:"B",...}
         elif isinstance(obj, list):
             labels = {i: str(v) for i, v in enumerate(obj)}
         else:
@@ -48,6 +60,7 @@ def load_labels():
         with open(LABELS_JSON_PATH, "r", encoding="utf-8") as f:
             raw = json.load(f)
         if isinstance(raw, dict):
+            # 可能是{"0":"A","1":"B"}或{"A":0,"B":1}
             if all(isinstance(k, str) and k.isdigit() for k in raw.keys()):
                 labels = {int(k): str(v) for k, v in raw.items()}
             else:
@@ -59,6 +72,7 @@ def load_labels():
         print("标签映射(labels.json):", labels)
         return labels
 
+    # 实在找不到就用默认
     labels = {0: "A", 1: "B", 2: "C", 3: "empty"}
     print("标签映射(默认):", labels)
     return labels
@@ -70,6 +84,7 @@ def build_model(num_classes, device):
     in_features = model.fc.in_features
     model.fc = nn.Linear(in_features, num_classes)
     model = model.to(device)
+    model.eval()
     return model
 
 
@@ -88,63 +103,65 @@ def init_model(device):
     print("模型已加载:", MODEL_PATH)
     return model, labels
 
-transform = transforms.Compose([
-    transforms.ToPILImage(),
-    transforms.Resize((IMG_SIZE, IMG_SIZE)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-])
 
+# ========== 屏幕检测与预处理(参考predict_camera逻辑) ==========
 
-def find_screen_roi(frame):
+def find_phone_roi(frame):
+    """
+    在整帧里找最亮的区域(手机屏幕),返回裁剪后的roi和框坐标.
+    ROI找不到时返回(None,None)
+    """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thresh = cv2.threshold(blur, 200, 255, cv2.THRESH_BINARY)
+
+    # 简单阈值+形态学,和camera版本一致
+    _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+    kernel = np.ones((5, 5), np.uint8)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
 
     contours, _ = cv2.findContours(
         thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
     if not contours:
-        return None
+        return None, None
 
-    h_img, w_img = gray.shape
-    img_area = h_img * w_img
+    # 最大轮廓认为是屏幕
+    cnt = max(contours, key=cv2.contourArea)
+    h, w = gray.shape
+    area = cv2.contourArea(cnt)
 
-    max_box = None
-    max_area = 0
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        area = w * h
-        if area < img_area * 0.02:
-            continue
-        if area > max_area:
-            max_area = area
-            max_box = (x, y, w, h)
+    # 屏幕太小直接忽略
+    if area < 0.01 * h * w:
+        return None, None
 
-    if max_box is None:
-        return None
+    x, y, bw, bh = cv2.boundingRect(cnt)
 
-    x, y, w, h = max_box
-    pad = 10
-    x = max(x - pad, 0)
-    y = max(y - pad, 0)
-    w = min(w + 2 * pad, w_img - x)
-    h = min(h + 2 * pad, h_img - y)
-    return x, y, w, h
+    # 按比例扩一点边界,比固定10像素更鲁棒
+    pad_x = int(0.1 * bw)
+    pad_y = int(0.1 * bh)
+    x1 = max(0, x - pad_x)
+    y1 = max(0, y - pad_y)
+    x2 = min(frame.shape[1], x + bw + pad_x)
+    y2 = min(frame.shape[0], y + bh + pad_y)
+
+    roi = frame[y1:y2, x1:x2]
+    return roi, (x1, y1, x2, y2)
 
 
 def preprocess_roi(roi, device):
+    """把ROI转成模型需要的tensor"""
     img_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
     tensor = transform(img_rgb).unsqueeze(0).to(device)
     return tensor
 
 
+# ========== 业务逻辑:标签->状态码,状态投票,串口发送 ==========
+
 def decide_state(pred_label, conf):
     """
     根据预测结果决定要发给单片机的状态码:
-    '1' -> 正确药物(TARGET_CHAR)
-    '0' -> 错误药物(别的字母)
-    '2' -> empty或置信度太低
+    "1" -> 正确药物(TARGET_CHAR)
+    "0" -> 错误药物(别的字母)
+    "2" -> empty或置信度太低
     """
     if conf < MIN_CONF or pred_label == EMPTY_NAME:
         return "2"
@@ -154,7 +171,12 @@ def decide_state(pred_label, conf):
 
 
 def vote_and_send(state_code, history, ser, last_sent, pred_label, conf):
-  
+    """
+    串口侧的多数投票:
+    1.把本帧state_code塞进history
+    2.当history满了以后,做一次投票
+    3.如果投票结果和上次发送的不一样,并且满足计数门槛,就发
+    """
     history.append(state_code)
 
     send_code = None
@@ -170,28 +192,39 @@ def vote_and_send(state_code, history, ser, last_sent, pred_label, conf):
 
     return last_sent
 
+
+# ========== 主循环 ==========
+
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("使用设备:", device)
 
     model, labels = init_model(device)
 
+    # 打开串口
     try:
         ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
         time.sleep(2)
         print("串口已打开:", SERIAL_PORT)
+        # 先发一个"2"让灯和蜂鸣器全部关闭
         ser.write(b"2")
     except Exception as e:
         print("打开串口失败:", e)
         ser = None
 
+    # 打开摄像头
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("无法打开摄像头")
         return
 
-    history = deque(maxlen=HISTORY_LEN)
+    # 状态码投票(history)和标签投票(label_history)分开
+    history = deque(maxlen=HISTORY_LEN)     # "0/1/2"状态码
+    label_history = deque(maxlen=10)        # 预测标签"A/B/C/empty"
+
     last_sent = None
+    last_label = EMPTY_NAME
+    last_prob = 1.0
 
     try:
         while True:
@@ -200,29 +233,53 @@ def main():
                 print("读取摄像头失败")
                 break
 
-            roi_box = find_screen_roi(frame)
-            if roi_box is not None:
-                x, y, w, h = roi_box
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                roi = frame[y:y + h, x:x + w]
+            # 1.先用camera里那套逻辑找手机屏幕
+            roi, box = find_phone_roi(frame)
+
+            if roi is None:
+                # 找不到屏幕,直接当empty,并且不走模型推理
+                current_label = EMPTY_NAME
+                max_prob = 1.0
             else:
-                roi = frame
-
-            with torch.no_grad():
+                # 找到了屏幕,才用ROI送进模型
                 input_tensor = preprocess_roi(roi, device)
-                logits = model(input_tensor)
-                probs = F.softmax(logits, dim=1)[0].cpu().numpy()
+                with torch.no_grad():
+                    logits = model(input_tensor)
+                    probs = F.softmax(logits, dim=1)[0].cpu().numpy()
 
-            pred_idx = int(np.argmax(probs))
-            conf = float(probs[pred_idx])
-            pred_label = labels[pred_idx]
+                pred_idx = int(np.argmax(probs))
+                max_prob = float(probs[pred_idx])
+                current_label = labels[pred_idx]
 
-            state_code = decide_state(pred_label, conf)
+                # 画框
+                if box is not None:
+                    x1, y1, x2, y2 = box
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+            # 2.标签层面的多数投票(跟predict_camera逻辑保持一致)
+            label_history.append(current_label)
+
+            if len(label_history) >= 5:
+                major, count = Counter(label_history).most_common(1)[0]
+                final_label = major
+
+                # 如果多数投票给empty但置信度又很低,用上一帧的标签稳定一下
+                if final_label == EMPTY_NAME and max_prob < 0.6:
+                    final_label = last_label
+            else:
+                final_label = current_label
+
+            last_label = final_label
+            last_prob = max_prob
+
+            # 3.根据“平滑后的标签+置信度”决定要不要给单片机发状态码
+            state_code = decide_state(final_label, last_prob)
             last_sent = vote_and_send(
-                state_code, history, ser, last_sent, pred_label, conf
+                state_code, history, ser, last_sent, final_label, last_prob
             )
 
-            text = f"Pred:{pred_label} {conf:.2f}"
+            # 4.在画面上显示结果
+            text = f"Pred:{final_label} {last_prob:.2f}"
             cv2.putText(frame, text, (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 1,
                         (0, 0, 255), 2)
